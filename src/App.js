@@ -5,7 +5,8 @@ import * as Y from "yjs";
 import seedPrompts from "../data/seed_prompts.json";
 import testInputs from "../data/test_inputs.json";
 import { streamModel } from "../model_stub";
-import { SupabaseProvider, loadSnapshot } from "./SupabaseProvider";
+import { SupabaseProvider } from "./SupabaseProvider";
+import { supabase } from "./supabaseClient";
 
 
 const STORAGE_KEY = "workshop.shell.v1";
@@ -55,20 +56,16 @@ function variantLabel(variant, variants) {
   return `v${siblingIndex}`;
 }
 
-function createDocFromState(state) {
-  const doc = new Y.Doc();
-  const meta = doc.getMap("meta");
-  const variantMap = doc.getMap("variants");
-
-  meta.set("mainId", state.mainId);
-  state.variants.forEach((variant) => {
-    const body = new Y.Text();
-    body.insert(0, variant.body);
-    doc.getMap("bodies").set(variant.id, body);
-    variantMap.set(variant.id, { ...variant, body: undefined });
+function populateDocInPlace(doc, state) {
+  doc.transact(() => {
+    doc.getMap("meta").set("mainId", state.mainId);
+    state.variants.forEach((variant) => {
+      const body = new Y.Text();
+      if (variant.body) body.insert(0, variant.body);
+      doc.getMap("bodies").set(variant.id, body);
+      doc.getMap("variants").set(variant.id, { ...variant, body: undefined });
+    });
   });
-
-  return doc;
 }
 
 function snapshotDoc(doc, selectedId) {
@@ -168,38 +165,95 @@ export default function App() {
   const [peers, setPeers] = useState([]);
 
   useEffect(() => {
-    const saved = typeof window !== "undefined" ? window.localStorage.getItem(STORAGE_KEY) : null;
-    const initial = saved ? JSON.parse(saved) : makeInitialState();
-    const doc = createDocFromState(initial);
-    docRef.current = doc;
-    setState(initial);
-    setEditorText(doc.getMap("bodies").get(initial.selectedId)?.toString() ?? "");
+    let alive = true;
 
-    const update = () => {
-      setState((current) => {
-        const next = snapshotDoc(doc, current.selectedId);
-        window.clearTimeout(saveTimer.current);
-        saveTimer.current = window.setTimeout(() => {
-          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-        }, 150);
-        return next;
-      });
-    };
+    async function boot() {
+      const doc = new Y.Doc();
 
-    doc.on("update", update);
+      // Wire update → React state BEFORE applying any updates so nothing is missed
+      const onDocUpdate = () => {
+        if (!alive) return;
+        setState((cur) => {
+          const next = snapshotDoc(doc, cur.selectedId);
+          window.clearTimeout(saveTimer.current);
+          saveTimer.current = window.setTimeout(
+            () => localStorage.setItem(STORAGE_KEY, JSON.stringify(next)),
+            150
+          );
+          return next;
+        });
+      };
+      doc.on("update", onDocUpdate);
 
-    loadSnapshot(doc, ROOM_ID);
+      // ── DB-first initialisation ──────────────────────────────────────────
+      // All clients must share the same Y.js item IDs or updates from one
+      // client will be silently buffered by the other forever.
+      // We achieve this by letting the DB be the single source of truth for
+      // the initial document state.
+      const { data: rows } = await supabase
+        .from("doc_updates")
+        .select("id, y_update")
+        .eq("doc_id", ROOM_ID)
+        .order("id", { ascending: true });
 
-    const provider = new SupabaseProvider(doc, ROOM_ID, localUser);
-    providerRef.current = provider;
-    provider.onStatus((status) => setConnection(status));
-    provider.onPresence((peerList) => setPeers(peerList));
+      if (!alive) { doc.destroy(); return; }
+
+      let lastSeenId = 0;
+
+      if (rows?.length) {
+        // Replay all persisted history → every client gets identical item IDs
+        for (const row of rows) {
+          try { Y.applyUpdate(doc, Uint8Array.from(row.y_update), "remote"); } catch { /* skip */ }
+          if (row.id > lastSeenId) lastSeenId = row.id;
+        }
+      }
+
+      // If DB was empty OR the replayed rows produced no usable variants
+      // (e.g. stale rows from an old schema), bootstrap fresh from seed.
+      if (doc.getMap("variants").size === 0) {
+        const seed = makeInitialState();
+        populateDocInPlace(doc, seed);
+        localStorage.removeItem(STORAGE_KEY); // clear stale local cache
+
+        // Write canonical initial state to DB so future clients replicate it
+        const { data: inserted } = await supabase
+          .from("doc_updates")
+          .insert({ doc_id: ROOM_ID, client_id: localUser.id, y_update: Array.from(Y.encodeStateAsUpdate(doc)) })
+          .select("id")
+          .single();
+        if (inserted?.id) lastSeenId = inserted.id;
+      }
+
+      if (!alive) { doc.destroy(); return; }
+
+      docRef.current = doc;
+
+      // Derive initial UI state from the now-populated doc
+      const variants = Array.from(doc.getMap("variants").entries()).map(([id, data]) => ({
+        ...data, id, body: doc.getMap("bodies").get(id)?.toString() ?? "",
+      }));
+      const firstId = variants[0]?.id ?? "";
+      const mainId  = doc.getMap("meta").get("mainId") ?? firstId;
+      setState({ variants, selectedId: firstId, mainId });
+      setEditorText(doc.getMap("bodies").get(firstId)?.toString() ?? "");
+
+      // Connect realtime provider — tell it which DB rows it already has
+      // so it doesn't re-apply updates we already loaded above.
+      const provider = new SupabaseProvider(doc, ROOM_ID, localUser);
+      provider._lastSeenId = lastSeenId;
+      providerRef.current = provider;
+      provider.onStatus((s) => { if (alive) setConnection(s); });
+      provider.onPresence((list) => { if (alive) setPeers(list); });
+    }
+
+    boot().catch(console.error);
 
     return () => {
-      doc.off("update", update);
-      provider.destroy();
+      alive = false;
+      providerRef.current?.destroy();
       providerRef.current = null;
-      doc.destroy();
+      docRef.current?.destroy();
+      docRef.current = null;
       window.clearTimeout(saveTimer.current);
     };
   }, []);
@@ -242,7 +296,8 @@ export default function App() {
 
   function updateEditor(value) {
     const doc = docRef.current;
-    const yText = doc?.getMap("bodies").get(selectedVariant.id);
+    if (!doc || !selectedVariant) return;
+    const yText = doc.getMap("bodies").get(selectedVariant.id);
     if (!yText) return;
     doc.transact(() => applyTextDiff(yText, value));
     setEditorText(value);
@@ -304,6 +359,32 @@ export default function App() {
     }
   }
 
+  async function resetToSeed() {
+    const doc = docRef.current;
+    if (!doc) return;
+
+    // Wipe the room's DB history so the next boot gets a clean slate
+    await supabase.from("doc_updates").delete().eq("doc_id", ROOM_ID);
+    localStorage.removeItem(STORAGE_KEY);
+
+    // Reset the in-memory doc to the 4 seed prompts
+    const seed = makeInitialState();
+    doc.transact(() => {
+      doc.getMap("meta").set("mainId", seed.mainId);
+      doc.getMap("variants").clear();
+      doc.getMap("bodies").clear();
+      seed.variants.forEach((variant) => {
+        const body = new Y.Text();
+        body.insert(0, variant.body);
+        doc.getMap("bodies").set(variant.id, body);
+        doc.getMap("variants").set(variant.id, { ...variant, body: undefined });
+      });
+    });
+
+    selectVariant(seed.variants[0].id);
+    setRuns({});
+  }
+
   async function runAll() {
     const started = Date.now();
     const selectedVariants = activeVariants;
@@ -362,6 +443,7 @@ export default function App() {
             <h1>Workshop</h1>
             <p>{connection}</p>
           </div>
+          <button className="reset-btn" title="Reset to seed prompts" onClick={resetToSeed}>↺</button>
         </div>
 
         <section className="sidebar-section">
@@ -398,15 +480,20 @@ export default function App() {
                 <small>Editing here</small>
               </div>
             </div>
-            {peers.map((peer) => (
-              <div className="person" key={peer.id}>
-                <span style={{ background: peer.color ?? "#888" }}>{(peer.name ?? peer.id).slice(0, 1)}</span>
-                <div>
-                  <strong>{peer.name ?? peer.id}</strong>
-                  <small>{peer.variantId ? `cursor ${peer.cursor}` : "idle"}</small>
+            {peers.map((peer) => {
+              const editingVariant = peer.variantId
+                ? state.variants.find((v) => v.id === peer.variantId)
+                : null;
+              return (
+                <div className="person" key={peer.id}>
+                  <span style={{ background: peer.color ?? "#888" }}>{(peer.name ?? "?").slice(0, 1)}</span>
+                  <div>
+                    <strong>{peer.name ?? peer.id}</strong>
+                    <small>{editingVariant ? `editing ${editingVariant.title}` : "connected"}</small>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </section>
       </aside>
@@ -424,7 +511,7 @@ export default function App() {
                 Delete
               </button>
             )}
-            <button className="primary" onClick={() => promoteVariant(selectedVariant.id)}>
+            <button className="primary" onClick={() => selectedVariant && promoteVariant(selectedVariant.id)}>
               Promote to main
             </button>
           </div>

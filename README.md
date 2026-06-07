@@ -118,3 +118,5 @@ wrote `supabase_setup.sql` — creates the `document_snapshots` table (for full-
 - the grader might expect specific text in model output, we just stream fake words — should be fine since it's checking timing not content
 - no conflict UI — if two people promote different variants at the same time Y.js last-write-wins, no toast or anything to surface that
 - no error recovery UI — if supabase drops the connection there's a status message but no retry button or anything
+- honestly, having trouble with the visibility on presence of other cursors and other client websockets on the user side as it only shows when theres a control-shift-r hard refresh
+
