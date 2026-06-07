@@ -154,16 +154,18 @@ function TreeNode({ variant, variants, selectedId, mainId, onSelect, onDelete, k
 }
 
 export default function App() {
-  const docRef = useRef(null);
-  const saveTimer = useRef(null);
+  const docRef      = useRef(null);
+  const listenerRef = useRef(null);
+  const saveTimer   = useRef(null);
   const providerRef = useRef(null);
-  const [state, setState] = useState(makeInitialState);
+  const [docReady, setDocReady]               = useState(false);
+  const [state, setState]                     = useState(makeInitialState);
   const [selectedInputId, setSelectedInputId] = useState(testInputs.inputs[0].id);
-  const [editorText, setEditorText] = useState("");
-  const [cursorOffset, setCursorOffset] = useState(0);
-  const [runs, setRuns] = useState({});
-  const [connection, setConnection] = useState("connecting…");
-  const [peers, setPeers] = useState([]);
+  const [editorText, setEditorText]           = useState("");
+  const [cursorOffset, setCursorOffset]       = useState(0);
+  const [runs, setRuns]                       = useState({});
+  const [connection, setConnection]           = useState("connecting…");
+  const [peers, setPeers]                     = useState([]);
 
   useEffect(() => {
     let alive = true;
@@ -171,26 +173,10 @@ export default function App() {
     async function boot() {
       const doc = new Y.Doc();
 
-      // Wire update → React state BEFORE applying any updates so nothing is missed
-      const onDocUpdate = () => {
-        if (!alive) return;
-        setState((cur) => {
-          const next = snapshotDoc(doc, cur.selectedId);
-          window.clearTimeout(saveTimer.current);
-          saveTimer.current = window.setTimeout(
-            () => localStorage.setItem(STORAGE_KEY, JSON.stringify(next)),
-            150
-          );
-          return next;
-        });
-      };
-      doc.on("update", onDocUpdate);
-
-      // ── DB-first initialisation ──────────────────────────────────────────
-      // All clients must share the same Y.js item IDs or updates from one
-      // client will be silently buffered by the other forever.
-      // We achieve this by letting the DB be the single source of truth for
-      // the initial document state.
+      // ── 1. Load canonical state from DB ─────────────────────────────────
+      // IMPORTANT: the update listener is NOT registered yet.  Registering it
+      // before we finish replaying the DB would fire setState with a partially-
+      // populated (or empty) doc, overwriting the initial seed state in React.
       const { data: rows } = await supabase
         .from("doc_updates")
         .select("id, y_update")
@@ -200,46 +186,64 @@ export default function App() {
       if (!alive) { doc.destroy(); return; }
 
       let lastSeenId = 0;
-
       if (rows?.length) {
-        // Replay all persisted history → every client gets identical item IDs
         for (const row of rows) {
-          try { Y.applyUpdate(doc, Uint8Array.from(row.y_update), "remote"); } catch { /* skip */ }
+          try { Y.applyUpdate(doc, Uint8Array.from(row.y_update), "remote"); } catch { /* corrupt row — skip */ }
           if (row.id > lastSeenId) lastSeenId = row.id;
         }
       }
 
-      // If DB was empty OR the replayed rows produced no usable variants
-      // (e.g. stale rows from an old schema), bootstrap fresh from seed.
+      // ── 2. Bootstrap when empty ──────────────────────────────────────────
+      // Covers: (a) brand-new room, (b) DB had only orphaned incremental rows
+      // whose anchor items don't exist — Y.js silently buffers those forever.
       if (doc.getMap("variants").size === 0) {
-        const seed = makeInitialState();
-        populateDocInPlace(doc, seed);
-        localStorage.removeItem(STORAGE_KEY); // clear stale local cache
-
-        // Write canonical initial state to DB so future clients replicate it
-        const { data: inserted } = await supabase
+        if (rows?.length) {
+          // Stale/unresolvable rows — purge so future clients don't loop.
+          await supabase.from("doc_updates").delete().eq("doc_id", ROOM_ID);
+          lastSeenId = 0;
+        }
+        localStorage.removeItem(STORAGE_KEY);
+        populateDocInPlace(doc, makeInitialState());
+        // Write seed as first DB row; all subsequent clients replay this.
+        const { data: ins } = await supabase
           .from("doc_updates")
           .insert({ doc_id: ROOM_ID, client_id: localUser.id, y_update: Array.from(Y.encodeStateAsUpdate(doc)) })
-          .select("id")
-          .single();
-        if (inserted?.id) lastSeenId = inserted.id;
+          .select("id").single();
+        if (ins?.id) lastSeenId = ins.id;
       }
 
       if (!alive) { doc.destroy(); return; }
 
+      // ── 3. Commit to refs and set React state ────────────────────────────
       docRef.current = doc;
 
-      // Derive initial UI state from the now-populated doc
-      const variants = Array.from(doc.getMap("variants").entries()).map(([id, data]) => ({
+      const allVariants = Array.from(doc.getMap("variants").entries()).map(([id, data]) => ({
         ...data, id, body: doc.getMap("bodies").get(id)?.toString() ?? "",
       }));
-      const firstId = variants[0]?.id ?? "";
+      const firstId = allVariants[0]?.id ?? "";
       const mainId  = doc.getMap("meta").get("mainId") ?? firstId;
-      setState({ variants, selectedId: firstId, mainId });
+      setState({ variants: allVariants, selectedId: firstId, mainId });
       setEditorText(doc.getMap("bodies").get(firstId)?.toString() ?? "");
 
-      // Connect realtime provider — tell it which DB rows it already has
-      // so it doesn't re-apply updates we already loaded above.
+      // ── 4. Register incremental-update listener NOW (after init) ─────────
+      const onDocUpdate = () => {
+        if (!alive) return;
+        setState((cur) => {
+          const next = snapshotDoc(doc, cur.selectedId);
+          window.clearTimeout(saveTimer.current);
+          saveTimer.current = window.setTimeout(
+            () => localStorage.setItem(STORAGE_KEY, JSON.stringify(next)), 150
+          );
+          return next;
+        });
+      };
+      listenerRef.current = onDocUpdate;
+      doc.on("update", onDocUpdate);
+
+      // ── 5. Signal text-observer effect that docRef is ready ──────────────
+      setDocReady(true);
+
+      // ── 6. Connect realtime provider ─────────────────────────────────────
       const provider = new SupabaseProvider(doc, ROOM_ID, localUser, SESSION_ID);
       provider._lastSeenId = lastSeenId;
       providerRef.current = provider;
@@ -252,6 +256,9 @@ export default function App() {
 
     return () => {
       alive = false;
+      if (docRef.current && listenerRef.current) {
+        docRef.current.off("update", listenerRef.current);
+      }
       providerRef.current?.destroy();
       providerRef.current = null;
       docRef.current?.destroy();
