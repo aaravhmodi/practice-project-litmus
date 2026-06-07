@@ -5,6 +5,8 @@ import * as Y from "yjs";
 import seedPrompts from "../data/seed_prompts.json";
 import testInputs from "../data/test_inputs.json";
 import { streamModel } from "../model_stub";
+import { SupabaseProvider } from "./SupabaseProvider";
+
 
 const STORAGE_KEY = "workshop.shell.v1";
 const ROOM_ID = "prompt-workshop:p1";
