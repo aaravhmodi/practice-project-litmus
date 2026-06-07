@@ -10,7 +10,8 @@
   "dependencies": {
     "next": "^15.0.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "yjs": "^13.6.31"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
