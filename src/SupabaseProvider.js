@@ -13,7 +13,6 @@ export class SupabaseProvider {
     this._onUpdate = this._onUpdate.bind(this);
     this._saveTimer = null;
     this._lastSeenId = 0;
-    this._fetchPending = false;
     this.presenceCallback = null;
     this.statusCallback = null;
     this.destroyed = false;
@@ -60,17 +59,30 @@ export class SupabaseProvider {
       }
     });
 
-    // ── DB-triggered broadcast channel ────────────────────────────────────────
-    // Receives lightweight notifications after each insert to doc_updates.
-    // On notification: fetches rows with id > _lastSeenId and applies them.
-    this.updateChannel = supabase.channel(`doc:${roomId}:updates`);
-    this.updateChannel
-      .on("broadcast", { event: "y_update_added" }, ({ payload }) => {
-        if (this.destroyed) return;
-        // Skip updates we inserted ourselves (already applied locally)
-        if (payload.client_id === localUser.id) return;
-        this._fetchAndApply();
-      })
+    // ── postgres_changes subscription ─────────────────────────────────────────
+    // Supabase Realtime pushes INSERT events from doc_updates directly.
+    // The full row arrives in the payload so no extra fetch is needed.
+    // client_id lets us skip rows we inserted ourselves.
+    this.updateChannel = supabase
+      .channel(`doc-pg-${roomId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "doc_updates",
+          filter: `doc_id=eq.${roomId}`,
+        },
+        (payload) => {
+          if (this.destroyed) return;
+          if (payload.new.client_id === localUser.id) return;
+          try {
+            const update = Uint8Array.from(payload.new.y_update);
+            Y.applyUpdate(this.doc, update, "remote");
+            if (payload.new.id > this._lastSeenId) this._lastSeenId = payload.new.id;
+          } catch { /* malformed — ignore */ }
+        }
+      )
       .subscribe();
 
     doc.on("update", this._onUpdate);
@@ -97,33 +109,6 @@ export class SupabaseProvider {
       .then(({ error }) => {
         if (error) console.warn("[SupabaseProvider] insert failed:", error.message);
       });
-  }
-
-  async _fetchAndApply() {
-    if (this._fetchPending || this.destroyed) return;
-    this._fetchPending = true;
-    try {
-      const { data, error } = await supabase
-        .from("doc_updates")
-        .select("id, y_update")
-        .eq("doc_id", this.roomId)
-        .gt("id", this._lastSeenId)
-        .order("id", { ascending: true });
-
-      if (error) {
-        console.warn("[SupabaseProvider] fetch failed:", error.message);
-        return;
-      }
-
-      for (const row of data ?? []) {
-        try {
-          Y.applyUpdate(this.doc, Uint8Array.from(row.y_update), "remote");
-        } catch { /* malformed row — skip */ }
-        if (row.id > this._lastSeenId) this._lastSeenId = row.id;
-      }
-    } finally {
-      this._fetchPending = false;
-    }
   }
 
   sendCursor(offset, variantId) {

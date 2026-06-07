@@ -47,28 +47,7 @@ drop policy if exists "anyone can insert doc_updates" on public.doc_updates;
 create policy "anyone can insert doc_updates"
   on public.doc_updates for insert with check (true);
 
--- ── Broadcast trigger ─────────────────────────────────────────────────────────
--- After every insert, fires a Realtime Broadcast on topic "doc:<doc_id>:updates".
--- The payload is lightweight (just the new row's id + client_id) so receivers
--- fetch the actual binary data from the table instead of decoding it from the event.
-create or replace function public.notify_doc_update()
-returns trigger language plpgsql security definer as $$
-begin
-  perform realtime.send(
-    jsonb_build_object(
-      'id',        NEW.id,
-      'doc_id',    NEW.doc_id,
-      'client_id', NEW.client_id
-    ),
-    'y_update_added',
-    'doc:' || NEW.doc_id || ':updates',
-    false   -- false = public channel (no auth required)
-  );
-  return NEW;
-end;
-$$;
-
-drop trigger if exists doc_update_broadcast_trigger on public.doc_updates;
-create trigger doc_update_broadcast_trigger
-  after insert on public.doc_updates
-  for each row execute function public.notify_doc_update();
+-- ── Realtime publication ──────────────────────────────────────────────────────
+-- Adds doc_updates to the supabase_realtime publication so clients can receive
+-- postgres_changes events (INSERT) without needing a trigger function.
+alter publication supabase_realtime add table public.doc_updates;
