@@ -5,24 +5,37 @@ import * as Y from "yjs";
 import seedPrompts from "../data/seed_prompts.json";
 import testInputs from "../data/test_inputs.json";
 import { streamModel } from "../model_stub";
-import { SupabaseProvider } from "./SupabaseProvider";
+import { SupabaseProvider, loadSnapshot } from "./SupabaseProvider";
 
 
 const STORAGE_KEY = "workshop.shell.v1";
 const ROOM_ID = "prompt-workshop:p1";
+const IDENTITY_KEY = "workshop.identity.v1";
 
-const people = [
-  { id: "u1", name: "You", color: "#1769aa" },
-  { id: "u2", name: "Maya", color: "#c2410c" },
-  { id: "u3", name: "Noah", color: "#2f855a" },
+const SESSION_COLORS = [
+  "#1769aa", "#c2410c", "#2f855a", "#7c3aed", "#b45309",
+  "#0e7490", "#be185d", "#4d7c0f", "#9333ea", "#c2410c",
 ];
+
+function getOrCreateIdentity() {
+  if (typeof window === "undefined") return { id: "u1", name: "You", color: SESSION_COLORS[0] };
+  const saved = window.localStorage.getItem(IDENTITY_KEY);
+  if (saved) return JSON.parse(saved);
+  const idx = Math.floor(Math.random() * SESSION_COLORS.length);
+  const id = `u-${Math.random().toString(36).slice(2, 8)}`;
+  const identity = { id, name: "You", color: SESSION_COLORS[idx] };
+  window.localStorage.setItem(IDENTITY_KEY, JSON.stringify(identity));
+  return identity;
+}
+
+const localUser = getOrCreateIdentity();
 
 function makePrompt(seed, index) {
   const now = new Date(Date.now() - index * 120000).toISOString();
   return {
     ...seed,
     createdAt: now,
-    createdBy: people[index % people.length].id,
+    createdBy: localUser.id,
   };
 }
 
@@ -94,9 +107,9 @@ function applyTextDiff(yText, nextValue) {
   yText.insert(start, nextValue.slice(start, nextEnd));
 }
 
-function TreeNode({ variant, variants, selectedId, mainId, onSelect, depth = 0 }) {
+function TreeNode({ variant, variants, selectedId, mainId, onSelect, knownUsers, depth = 0 }) {
   const children = variants.filter((item) => item.parentId === variant.id);
-  const creator = people.find((person) => person.id === variant.createdBy);
+  const creator = knownUsers?.[variant.createdBy];
 
   return (
     <div className="tree-node">
@@ -121,6 +134,7 @@ function TreeNode({ variant, variants, selectedId, mainId, onSelect, depth = 0 }
           selectedId={selectedId}
           mainId={mainId}
           onSelect={onSelect}
+          knownUsers={knownUsers}
           depth={depth + 1}
         />
       ))}
@@ -131,12 +145,14 @@ function TreeNode({ variant, variants, selectedId, mainId, onSelect, depth = 0 }
 export default function App() {
   const docRef = useRef(null);
   const saveTimer = useRef(null);
+  const providerRef = useRef(null);
   const [state, setState] = useState(makeInitialState);
   const [selectedInputId, setSelectedInputId] = useState(testInputs.inputs[0].id);
   const [editorText, setEditorText] = useState("");
   const [cursorOffset, setCursorOffset] = useState(0);
   const [runs, setRuns] = useState({});
-  const [connection, setConnection] = useState("Shell only");
+  const [connection, setConnection] = useState("connecting…");
+  const [peers, setPeers] = useState([]);
 
   useEffect(() => {
     const saved = typeof window !== "undefined" ? window.localStorage.getItem(STORAGE_KEY) : null;
@@ -158,10 +174,18 @@ export default function App() {
     };
 
     doc.on("update", update);
-    setConnection("Y.Doc active, websocket provider pending");
+
+    loadSnapshot(doc, ROOM_ID);
+
+    const provider = new SupabaseProvider(doc, ROOM_ID, localUser);
+    providerRef.current = provider;
+    provider.onStatus((status) => setConnection(status));
+    provider.onPresence((peerList) => setPeers(peerList));
 
     return () => {
       doc.off("update", update);
+      provider.destroy();
+      providerRef.current = null;
       doc.destroy();
       window.clearTimeout(saveTimer.current);
     };
@@ -170,6 +194,11 @@ export default function App() {
   const selectedVariant = state.variants.find((variant) => variant.id === state.selectedId) ?? state.variants[0];
   const selectedInput = testInputs.inputs.find((input) => input.id === selectedInputId) ?? testInputs.inputs[0];
   const roots = state.variants.filter((variant) => !variant.parentId);
+  const knownUsers = useMemo(() => {
+    const map = { [localUser.id]: localUser };
+    peers.forEach((p) => { if (p.id && p.color) map[p.id] = p; });
+    return map;
+  }, [peers]);
   const activeVariants = useMemo(() => {
     if (!selectedVariant) return [];
     const rootId = selectedVariant.parentId
@@ -189,6 +218,10 @@ export default function App() {
     text.observe(update);
     return () => text.unobserve(update);
   }, [selectedVariant?.id]);
+
+  useEffect(() => {
+    providerRef.current?.sendCursor(cursorOffset, selectedVariant?.id ?? null);
+  }, [cursorOffset, selectedVariant?.id]);
 
   function selectVariant(id) {
     setState((current) => ({ ...current, selectedId: id }));
@@ -215,7 +248,7 @@ export default function App() {
       title: `${selectedVariant.title} fork`,
       parentId: selectedVariant.id,
       createdAt: new Date().toISOString(),
-      createdBy: "u1",
+      createdBy: localUser.id,
     };
 
     doc.transact(() => {
@@ -307,6 +340,7 @@ export default function App() {
                 selectedId={selectedVariant?.id}
                 mainId={state.mainId}
                 onSelect={selectVariant}
+                knownUsers={knownUsers}
               />
             ))}
           </div>
@@ -315,15 +349,22 @@ export default function App() {
         <section className="sidebar-section">
           <div className="section-title">
             <span>Presence</span>
-            <b>{people.length}</b>
+            <b>{1 + peers.length}</b>
           </div>
           <div className="presence-list">
-            {people.map((person, index) => (
-              <div className="person" key={person.id}>
-                <span style={{ background: person.color }}>{person.name.slice(0, 1)}</span>
+            <div className="person" key={localUser.id}>
+              <span style={{ background: localUser.color }}>{localUser.name.slice(0, 1)}</span>
+              <div>
+                <strong>{localUser.name}</strong>
+                <small>Editing here</small>
+              </div>
+            </div>
+            {peers.map((peer) => (
+              <div className="person" key={peer.id}>
+                <span style={{ background: peer.color ?? "#888" }}>{(peer.name ?? peer.id).slice(0, 1)}</span>
                 <div>
-                  <strong>{person.name}</strong>
-                  <small>{index === 0 ? "Editing here" : `${selectedVariant?.title ?? "Prompt"} cursor ${18 + index * 31}`}</small>
+                  <strong>{peer.name ?? peer.id}</strong>
+                  <small>{peer.variantId ? `cursor ${peer.cursor}` : "idle"}</small>
                 </div>
               </div>
             ))}
@@ -359,14 +400,19 @@ export default function App() {
               spellCheck="false"
             />
             <div className="cursor-track">
-              {people.slice(1).map((person, index) => (
-                <span
-                  key={person.id}
-                  className="remote-cursor"
-                  style={{ left: `${Math.min(92, 24 + index * 34)}%`, background: person.color }}
-                  title={`${person.name} cursor`}
-                />
-              ))}
+              {peers
+                .filter((peer) => peer.variantId === selectedVariant?.id)
+                .map((peer) => {
+                  const pct = Math.min(96, Math.max(4, editorText.length ? (peer.cursor / editorText.length) * 100 : 4));
+                  return (
+                    <span
+                      key={peer.id}
+                      className="remote-cursor"
+                      style={{ left: `${pct}%`, background: peer.color ?? "#888" }}
+                      title={`${peer.name ?? peer.id} cursor`}
+                    />
+                  );
+                })}
               <span className="local-cursor" style={{ left: `${cursorPercent}%` }} />
             </div>
           </div>

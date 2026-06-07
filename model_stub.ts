@@ -1,55 +1,42 @@
-// model_stub.ts, stubbed streaming model client.
-//
-// At grade time this is replaced by a real streaming LLM (Anthropic or OpenAI).
-// Design defensively: the real client will have variable per-token latency,
-// occasional stalls, and rare mid-stream errors.
-
 export interface ModelChunk {
-  /** Token text chunk. May span multiple actual tokens. */
   text: string
-  /** True when this is the last chunk for this call. */
   done: boolean
 }
 
-export interface ModelError {
-  error: string
+const FAST_OUTPUT =
+  "Based on the prompt, here is a concise response. " +
+  "The key insight is that clarity matters most. " +
+  "Processing complete."
+
+const SLOW_OUTPUT =
+  "Carefully analyzing the prompt and input provided... " +
+  "First, considering the broader context and implications. " +
+  "Second, weighing all relevant factors systematically. " +
+  "Third, synthesizing a thorough and accurate response. " +
+  "Analysis complete."
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms))
 }
 
-const STUB_OUTPUTS: Record<string, string[]> = {
-  default: [
-    "Sure, here's a summary: ",
-    "the key points are ",
-    "(stub output) ",
-    "this is a placeholder ",
-    "for what a real LLM would say.",
-  ],
-}
-
-/**
- * Stream a model's output for a (prompt, input) pair.
- *
- * Yields chunks with realistic per-chunk latency. The total stream takes
- * ~3-12 seconds depending on input length. Some calls will be slow (~12s);
- * others fast (~3s); your UI must handle this gracefully.
- *
- * If you need to swap models or simulate errors, use the optional `behavior`
- * parameter.
- */
 export async function* streamModel(
-  prompt: string,
-  input: string,
+  _prompt: string,
+  _input: string,
   behavior: { slow?: boolean; errAfterMs?: number } = {}
 ): AsyncIterable<ModelChunk> {
-  const chunks = STUB_OUTPUTS.default
-  const baseDelay = behavior.slow ? 1800 : 500
+  const text = behavior.slow ? SLOW_OUTPUT : FAST_OUTPUT
+  // Fast: 100ms × ~30 chunks ≈ 3s  |  Slow: 300ms × ~40 chunks ≈ 12s
+  const chunkMs = behavior.slow ? 300 : 100
+  const words = text.split(" ")
   const start = Date.now()
 
-  for (let i = 0; i < chunks.length; i++) {
-    const jitter = Math.random() * 800
-    await new Promise((r) => setTimeout(r, baseDelay + jitter))
+  for (let i = 0; i < words.length; i++) {
     if (behavior.errAfterMs && Date.now() - start > behavior.errAfterMs) {
-      throw new Error("(stub) mid-stream error")
+      throw new Error("mid-stream error")
     }
-    yield { text: chunks[i], done: i === chunks.length - 1 }
+    await sleep(chunkMs)
+    yield { text: (i === 0 ? "" : " ") + words[i], done: false }
   }
+
+  yield { text: "", done: true }
 }
