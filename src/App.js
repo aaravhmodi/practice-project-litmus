@@ -512,7 +512,7 @@ export default function App() {
                 ? state.variants.find((v) => v.id === peer.variantId)
                 : null;
               return (
-                <div className="person" key={peer.id}>
+                <div className="person" key={peer.sessionId ?? peer.id}>
                   <span style={{ background: peer.color ?? "#888" }}>{(peer.name ?? "?").slice(0, 1)}</span>
                   <div>
                     <strong>{peer.name ?? peer.id}</strong>
