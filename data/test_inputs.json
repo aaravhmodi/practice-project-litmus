@@ -1,0 +1,9 @@
+{
+  "inputs": [
+    { "id": "i1", "label": "News article: Mars rover", "text": "NASA's Perseverance rover marked five years on Mars this week, having driven 27.4 kilometers, drilled 36 rock cores, and delivered the most detailed evidence yet of ancient microbial habitats. Mission scientists at JPL say the next stage focuses on returning the cached samples to Earth via a follow-on mission in 2030." },
+    { "id": "i2", "label": "Code snippet (Python)", "text": "def find_max(arr):\n    m = arr[0]\n    for i in range(len(arr)):\n        if arr[i] > m:\n            m = arr[i]\n    return m" },
+    { "id": "i3", "label": "Concept: database indexes", "text": "Explain why a database needs an index. Address: cost of writes, cost of reads without indexes, B-tree structure, when an index hurts." },
+    { "id": "i4", "label": "Unstructured text with entities", "text": "On October 17th, 2024, Dr. Elena Vasquez announced at a press conference in Geneva that her team at CERN had observed a new particle. Funding for the next phase came from the EU and was approved on January 4th, 2025. Vasquez's collaborators in Tokyo and São Paulo will run follow-up experiments." },
+    { "id": "i5", "label": "Long form: rent control essay", "text": "Rent control: a 1200-word essay on the second-order effects of price controls on housing markets, covering supply effects, quality decay, and the political economy of grandfathering." }
+  ]
+}

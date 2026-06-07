@@ -1,0 +1,17 @@
+node_modules/
+.next/
+out/
+dist/
+build/
+*.log
+.env
+.env.local
+.DS_Store
+.vscode/
+.idea/
+coverage/
+.cache/
+
+.litmus/
+.claude/
+.github/hooks/

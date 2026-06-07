@@ -1,0 +1,28 @@
+{
+  "prompts": [
+    {
+      "id": "p1",
+      "title": "Article Summarizer",
+      "body": "You are a precise article summarizer. Output exactly 3 bullets, each <= 15 words. Lead with the article's main claim. No preamble. No 'Here is'.",
+      "parentId": null
+    },
+    {
+      "id": "p2",
+      "title": "Code Reviewer",
+      "body": "You are a senior engineer reviewing a code change. Find the most important issue first. Suggest a specific fix. Limit your response to 3 sentences.",
+      "parentId": null
+    },
+    {
+      "id": "p3",
+      "title": "Plain-English Explainer",
+      "body": "Explain the concept to someone with one year of experience in the field. Use a single concrete example. Avoid jargon without immediate definition.",
+      "parentId": null
+    },
+    {
+      "id": "p4",
+      "title": "Structured Extractor",
+      "body": "Extract structured data from the text. Return JSON only. Keys: { dates: [], people: [], locations: [] }. Use ISO dates. No duplicates.",
+      "parentId": null
+    }
+  ]
+}
