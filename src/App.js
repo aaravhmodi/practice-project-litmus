@@ -372,12 +372,13 @@ export default function App() {
     const doc = docRef.current;
     if (!doc) return;
 
-    // Wipe the room's DB history so the next boot gets a clean slate
+    // Purge all DB history for this room
     await supabase.from("doc_updates").delete().eq("doc_id", ROOM_ID);
     localStorage.removeItem(STORAGE_KEY);
 
-    // Reset the in-memory doc to the 4 seed prompts
     const seed = makeInitialState();
+    // Use "remote" origin so SupabaseProvider._onUpdate skips the delta insert —
+    // we write a clean full snapshot ourselves below.
     doc.transact(() => {
       doc.getMap("meta").set("mainId", seed.mainId);
       doc.getMap("variants").clear();
@@ -388,9 +389,26 @@ export default function App() {
         doc.getMap("bodies").set(variant.id, body);
         doc.getMap("variants").set(variant.id, { ...variant, body: undefined });
       });
+    }, "remote");
+
+    // Write clean full snapshot so any new client boots from one unambiguous row
+    const fullSnapshot = Y.encodeStateAsUpdate(doc);
+    await supabase
+      .from("doc_updates")
+      .insert({ doc_id: ROOM_ID, client_id: localUser.id, y_update: Array.from(fullSnapshot) });
+
+    // Push the full snapshot to currently connected peers so they don't reload
+    providerRef.current?.channel.send({
+      type: "broadcast",
+      event: "y-update",
+      payload: { update: Array.from(fullSnapshot) },
     });
 
-    selectVariant(seed.variants[0].id);
+    const resetFirstId = seed.variants[0].id;
+    selectVariant(resetFirstId);
+    // Refresh editorText directly — text-observer won't re-fire if the selected
+    // variant id was already resetFirstId (dep array wouldn't change).
+    setEditorText(doc.getMap("bodies").get(resetFirstId)?.toString() ?? "");
     setRuns({});
   }
 
