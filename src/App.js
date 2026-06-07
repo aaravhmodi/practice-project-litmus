@@ -293,7 +293,7 @@ export default function App() {
     const update = () => setEditorText(text.toString());
     text.observe(update);
     return () => text.unobserve(update);
-  }, [selectedVariant?.id]);
+  }, [selectedVariant?.id, docReady]);
 
   useEffect(() => {
     providerRef.current?.sendCursor(cursorOffset, selectedVariant?.id ?? null);

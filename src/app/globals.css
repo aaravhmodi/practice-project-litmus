@@ -283,6 +283,20 @@ small,
   border-color: #f87171;
 }
 
+.reset-btn {
+  padding: 0 8px;
+  min-height: 28px;
+  font-size: 14px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.reset-btn:hover {
+  border-color: var(--line);
+  color: var(--ink);
+}
+
 .editor-band {
   display: grid;
   grid-template-rows: auto 1fr;
