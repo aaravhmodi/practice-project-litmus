@@ -2,10 +2,14 @@ import * as Y from "yjs";
 import { supabase } from "./supabaseClient";
 
 export class SupabaseProvider {
-  constructor(doc, roomId, localUser) {
+  constructor(doc, roomId, localUser, sessionId) {
     this.doc = doc;
     this.roomId = roomId;
     this.localUser = localUser;
+    // sessionId is unique per page load so two tabs in the same browser
+    // (which share the same localUser.id from localStorage) are treated as
+    // distinct presence entries instead of overwriting each other.
+    this.sessionId = sessionId ?? Math.random().toString(36).slice(2, 10);
     this._onUpdate = this._onUpdate.bind(this);
     this._saveTimer = null;
     this._lastSeenId = 0;
@@ -18,7 +22,7 @@ export class SupabaseProvider {
     this.channel = supabase.channel(roomId, {
       config: {
         broadcast: { self: false, ack: false },
-        presence: { key: localUser.id },
+        presence: { key: this.sessionId },
       },
     });
 
@@ -47,7 +51,7 @@ export class SupabaseProvider {
     this.channel.subscribe(async (status) => {
       if (this.destroyed) return;
       if (status === "SUBSCRIBED") {
-        await this.channel.track({ ...localUser, cursor: 0, variantId: null });
+        await this.channel.track({ ...localUser, sessionId: this.sessionId, cursor: 0, variantId: null });
         this.statusCallback?.("connected");
       } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
         this.statusCallback?.("error — reconnecting");
@@ -124,18 +128,24 @@ export class SupabaseProvider {
 
   sendCursor(offset, variantId) {
     if (this.destroyed) return;
-    this.channel.track({ ...this.localUser, cursor: offset, variantId });
+    this.channel.track({ ...this.localUser, sessionId: this.sessionId, cursor: offset, variantId });
   }
 
   _presencePeers() {
     const state = this.channel.presenceState();
     return Object.values(state)
       .flat()
-      .filter((p) => p.id !== this.localUser.id);
+      .filter((p) => p.sessionId !== this.sessionId);
   }
 
   onPresence(callback) { this.presenceCallback = callback; }
   onStatus(callback)   { this.statusCallback = callback; }
+
+  // Call after registering onPresence to catch any sync event that fired
+  // before the callback was set.
+  flushPresence() {
+    this.presenceCallback?.(this._presencePeers());
+  }
 
   destroy() {
     this.destroyed = true;

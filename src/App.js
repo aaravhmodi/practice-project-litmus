@@ -12,6 +12,7 @@ import { supabase } from "./supabaseClient";
 const STORAGE_KEY = "workshop.shell.v1";
 const ROOM_ID = "prompt-workshop:p1";
 const IDENTITY_KEY = "workshop.identity.v1";
+const SESSION_ID = Math.random().toString(36).slice(2, 10);
 
 const SESSION_COLORS = [
   "#1769aa", "#c2410c", "#2f855a", "#7c3aed", "#b45309",
@@ -239,11 +240,12 @@ export default function App() {
 
       // Connect realtime provider — tell it which DB rows it already has
       // so it doesn't re-apply updates we already loaded above.
-      const provider = new SupabaseProvider(doc, ROOM_ID, localUser);
+      const provider = new SupabaseProvider(doc, ROOM_ID, localUser, SESSION_ID);
       provider._lastSeenId = lastSeenId;
       providerRef.current = provider;
       provider.onStatus((s) => { if (alive) setConnection(s); });
       provider.onPresence((list) => { if (alive) setPeers(list); });
+      provider.flushPresence();
     }
 
     boot().catch(console.error);
