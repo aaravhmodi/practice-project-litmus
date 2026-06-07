@@ -120,3 +120,21 @@ wrote `supabase_setup.sql` — creates the `document_snapshots` table (for full-
 - no error recovery UI — if supabase drops the connection there's a status message but no retry button or anything
 - honestly, having trouble with the visibility on presence of other cursors and other client websockets on the user side as it only shows when theres a control-shift-r hard refresh
 
+**big rethink — db-first initialisation**
+hit a subtle but serious bug: two clients would both bootstrap from seed and generate different Y.js item IDs for the same logical variants. Y.js uses internal item IDs (clientID + clock) to track operations, and when two docs generate the same content independently they don't share IDs — so updates from one client would get silently buffered by the other forever, never converging. basically phantom sync — looked like it was working, wasn't.
+
+fix was switching to db-first init. instead of each client building their own doc from seed and then merging, the boot sequence now:
+1. fetches all rows from `doc_updates` and replays them in order → every client gets identical item IDs
+2. if the table is empty (first ever session), bootstraps from seed, writes that initial state to the db as the canonical row
+3. sets `lastSeenId` so the realtime provider knows which rows it already has and doesn't re-apply them
+
+this is the right approach — db is the single source of truth for the initial document shape, not local seed data.
+
+also removed the old `loadSnapshot` / `document_snapshots` approach for the boot path. that was masking the problem — it applied a full state update which looked like convergence but still had the ID mismatch issue underneath.
+
+**delete variant**
+added delete to the tree — the × button on each non-main variant. cleans up both the variant metadata from the variants map and its Y.Text body from the bodies map in one transaction. broadcasts to all peers automatically via Y.js sync. if you delete the selected variant it auto-selects the first remaining one.
+
+**runtime crash fix**
+was getting `Cannot read properties of undefined (reading 'id')` in updateEditor. happened because during the async boot, the Y.Doc is empty for a moment — `selectedVariant` comes back undefined before the db fetch completes. added an early return guard: `if (!doc || !selectedVariant) return`. same guard on the Promote button in the topbar.
+
