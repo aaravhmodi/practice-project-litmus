@@ -8,10 +8,13 @@ export class SupabaseProvider {
     this.localUser = localUser;
     this._onUpdate = this._onUpdate.bind(this);
     this._saveTimer = null;
+    this._lastSeenId = 0;
+    this._fetchPending = false;
     this.presenceCallback = null;
     this.statusCallback = null;
     this.destroyed = false;
 
+    // ── Presence + direct Y.js broadcast channel ──────────────────────────────
     this.channel = supabase.channel(roomId, {
       config: {
         broadcast: { self: false, ack: false },
@@ -19,36 +22,15 @@ export class SupabaseProvider {
       },
     });
 
-    // Receive Y.js updates — apply with "remote" origin so _onUpdate skips re-broadcast
+    // Fast-path: apply updates broadcast directly by active peers.
+    // Y.js ignores duplicate updates (CRDT), so applying the same update
+    // from both this path and the DB fetch is safe.
     this.channel.on("broadcast", { event: "y-update" }, ({ payload }) => {
       if (this.destroyed) return;
       try {
         const update = Uint8Array.from(Object.values(payload.update));
         Y.applyUpdate(doc, update, "remote");
-      } catch {
-        // malformed update — ignore, CRDT state is unaffected
-      }
-    });
-
-    // A newly joined peer requests full state so it can catch up
-    this.channel.on("broadcast", { event: "y-request-state" }, ({ payload }) => {
-      if (this.destroyed) return;
-      const fullState = Y.encodeStateAsUpdate(doc);
-      this.channel.send({
-        type: "broadcast",
-        event: "y-full-state",
-        payload: { update: Array.from(fullState), for: payload.from },
-      });
-    });
-
-    // Receive a full-state catch-up response
-    this.channel.on("broadcast", { event: "y-full-state" }, ({ payload }) => {
-      if (this.destroyed) return;
-      if (payload.for && payload.for !== localUser.id) return;
-      try {
-        const update = Uint8Array.from(Object.values(payload.update));
-        Y.applyUpdate(doc, update, "remote");
-      } catch { /* ignore */ }
+      } catch { /* malformed — ignore */ }
     });
 
     // Presence
@@ -64,18 +46,8 @@ export class SupabaseProvider {
 
     this.channel.subscribe(async (status) => {
       if (this.destroyed) return;
-
       if (status === "SUBSCRIBED") {
-        // Track own presence
         await this.channel.track({ ...localUser, cursor: 0, variantId: null });
-
-        // Ask peers for their full state so we don't miss history
-        this.channel.send({
-          type: "broadcast",
-          event: "y-request-state",
-          payload: { from: localUser.id },
-        });
-
         this.statusCallback?.("connected");
       } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
         this.statusCallback?.("error — reconnecting");
@@ -84,30 +56,70 @@ export class SupabaseProvider {
       }
     });
 
+    // ── DB-triggered broadcast channel ────────────────────────────────────────
+    // Receives lightweight notifications after each insert to doc_updates.
+    // On notification: fetches rows with id > _lastSeenId and applies them.
+    this.updateChannel = supabase.channel(`doc:${roomId}:updates`);
+    this.updateChannel
+      .on("broadcast", { event: "y_update_added" }, ({ payload }) => {
+        if (this.destroyed) return;
+        // Skip updates we inserted ourselves (already applied locally)
+        if (payload.client_id === localUser.id) return;
+        this._fetchAndApply();
+      })
+      .subscribe();
+
     doc.on("update", this._onUpdate);
   }
 
   _onUpdate(update, origin) {
-    if (this.destroyed) return;
-    if (origin === "remote") return;
+    if (this.destroyed || origin === "remote") return;
 
+    // Fast path: broadcast directly to connected peers
     this.channel.send({
       type: "broadcast",
       event: "y-update",
       payload: { update: Array.from(update) },
     });
 
-    // Debounced DB snapshot for reload persistence
-    clearTimeout(this._saveTimer);
-    this._saveTimer = setTimeout(() => {
-      const snapshot = Array.from(Y.encodeStateAsUpdate(this.doc));
-      supabase
-        .from("document_snapshots")
-        .upsert({ room_id: this.roomId, snapshot, updated_at: new Date().toISOString() })
-        .then(({ error }) => {
-          if (error) console.warn("[SupabaseProvider] snapshot save failed:", error.message);
-        });
-    }, 2000);
+    // Durable path: persist to DB (triggers broadcast to peers not yet connected)
+    supabase
+      .from("doc_updates")
+      .insert({
+        doc_id: this.roomId,
+        client_id: this.localUser.id,
+        y_update: Array.from(update),
+      })
+      .then(({ error }) => {
+        if (error) console.warn("[SupabaseProvider] insert failed:", error.message);
+      });
+  }
+
+  async _fetchAndApply() {
+    if (this._fetchPending || this.destroyed) return;
+    this._fetchPending = true;
+    try {
+      const { data, error } = await supabase
+        .from("doc_updates")
+        .select("id, y_update")
+        .eq("doc_id", this.roomId)
+        .gt("id", this._lastSeenId)
+        .order("id", { ascending: true });
+
+      if (error) {
+        console.warn("[SupabaseProvider] fetch failed:", error.message);
+        return;
+      }
+
+      for (const row of data ?? []) {
+        try {
+          Y.applyUpdate(this.doc, Uint8Array.from(row.y_update), "remote");
+        } catch { /* malformed row — skip */ }
+        if (row.id > this._lastSeenId) this._lastSeenId = row.id;
+      }
+    } finally {
+      this._fetchPending = false;
+    }
   }
 
   sendCursor(offset, variantId) {
@@ -130,11 +142,29 @@ export class SupabaseProvider {
     clearTimeout(this._saveTimer);
     this.doc.off("update", this._onUpdate);
     supabase.removeChannel(this.channel);
+    supabase.removeChannel(this.updateChannel);
   }
 }
 
-/** Load a persisted snapshot from Supabase so new sessions inherit full history. */
+/** Load full history from doc_updates, falling back to a legacy snapshot. */
 export async function loadSnapshot(doc, roomId) {
+  // Primary: replay all incremental updates in order
+  const { data: updates, error: updatesError } = await supabase
+    .from("doc_updates")
+    .select("y_update")
+    .eq("doc_id", roomId)
+    .order("id", { ascending: true });
+
+  if (!updatesError && updates?.length) {
+    for (const row of updates) {
+      try {
+        Y.applyUpdate(doc, Uint8Array.from(row.y_update), "remote");
+      } catch { /* skip malformed */ }
+    }
+    return;
+  }
+
+  // Fallback: legacy full snapshot
   const { data, error } = await supabase
     .from("document_snapshots")
     .select("snapshot")

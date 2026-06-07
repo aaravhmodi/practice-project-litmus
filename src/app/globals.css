@@ -131,6 +131,44 @@ small,
   gap: 3px;
 }
 
+.tree-row {
+  display: flex;
+  align-items: center;
+}
+
+.tree-row .tree-item {
+  flex: 1;
+  min-width: 0;
+}
+
+.tree-delete {
+  display: none;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  margin-right: 4px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  align-items: center;
+  justify-content: center;
+}
+
+.tree-row:hover .tree-delete {
+  display: flex;
+}
+
+.tree-delete:hover {
+  background: #fef2f2;
+  border-color: #fca5a5;
+  color: #dc2626;
+}
+
 .tree-item {
   display: grid;
   grid-template-columns: 18px 1fr auto auto;
@@ -232,6 +270,17 @@ small,
   background: var(--blue);
   border-color: var(--blue);
   color: #fff;
+}
+
+.actions .danger {
+  background: #fef2f2;
+  border-color: #fca5a5;
+  color: #dc2626;
+}
+
+.actions .danger:hover {
+  background: #fee2e2;
+  border-color: #f87171;
 }
 
 .editor-band {

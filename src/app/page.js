@@ -1,5 +1,5 @@
-import App from "../App";
+import ClientRoot from "./ClientRoot";
 
 export default function Page() {
-  return <App />;
+  return <ClientRoot />;
 }

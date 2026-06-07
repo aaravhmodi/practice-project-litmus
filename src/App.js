@@ -107,25 +107,37 @@ function applyTextDiff(yText, nextValue) {
   yText.insert(start, nextValue.slice(start, nextEnd));
 }
 
-function TreeNode({ variant, variants, selectedId, mainId, onSelect, knownUsers, depth = 0 }) {
+function TreeNode({ variant, variants, selectedId, mainId, onSelect, onDelete, knownUsers, depth = 0 }) {
   const children = variants.filter((item) => item.parentId === variant.id);
   const creator = knownUsers?.[variant.createdBy];
+  const isMain = mainId === variant.id;
 
   return (
     <div className="tree-node">
-      <button
-        className={`tree-item ${selectedId === variant.id ? "active" : ""}`}
-        style={{ paddingLeft: 12 + depth * 18 }}
-        onClick={() => onSelect(variant.id)}
-      >
-        <span className="tree-glyph">{children.length ? "▾" : "•"}</span>
-        <span>
-          <strong>{variantLabel(variant, variants)}</strong>
-          <small>{variant.title}</small>
-        </span>
-        {mainId === variant.id ? <em>Main</em> : null}
-        {creator ? <i style={{ background: creator.color }} /> : null}
-      </button>
+      <div className="tree-row">
+        <button
+          className={`tree-item ${selectedId === variant.id ? "active" : ""}`}
+          style={{ paddingLeft: 12 + depth * 18 }}
+          onClick={() => onSelect(variant.id)}
+        >
+          <span className="tree-glyph">{children.length ? "▾" : "•"}</span>
+          <span>
+            <strong>{variantLabel(variant, variants)}</strong>
+            <small>{variant.title}</small>
+          </span>
+          {isMain ? <em>Main</em> : null}
+          {creator ? <i style={{ background: creator.color }} /> : null}
+        </button>
+        {!isMain && (
+          <button
+            className="tree-delete"
+            title={children.length ? `Delete variant + ${children.length} child(ren)` : "Delete variant"}
+            onClick={() => onDelete(variant.id)}
+          >
+            ×
+          </button>
+        )}
+      </div>
       {children.map((child) => (
         <TreeNode
           key={child.id}
@@ -134,6 +146,7 @@ function TreeNode({ variant, variants, selectedId, mainId, onSelect, knownUsers,
           selectedId={selectedId}
           mainId={mainId}
           onSelect={onSelect}
+          onDelete={onDelete}
           knownUsers={knownUsers}
           depth={depth + 1}
         />
@@ -266,6 +279,31 @@ export default function App() {
     doc.transact(() => doc.getMap("meta").set("mainId", id));
   }
 
+  function deleteVariant(id) {
+    const doc = docRef.current;
+    if (!doc) return;
+    if (id === state.mainId) return; // main is protected
+
+    // Collect the target + every descendant
+    const toDelete = new Set(collectTree(id, state.variants).map((v) => v.id));
+
+    doc.transact(() => {
+      for (const vid of toDelete) {
+        doc.getMap("variants").delete(vid);
+        doc.getMap("bodies").delete(vid);
+      }
+    });
+
+    // If the currently selected variant was deleted, navigate to parent or first survivor
+    if (toDelete.has(state.selectedId)) {
+      const deleted = state.variants.find((v) => v.id === id);
+      const fallbackId =
+        (deleted?.parentId && !toDelete.has(deleted.parentId) ? deleted.parentId : null) ??
+        state.variants.find((v) => !toDelete.has(v.id))?.id;
+      if (fallbackId) selectVariant(fallbackId);
+    }
+  }
+
   async function runAll() {
     const started = Date.now();
     const selectedVariants = activeVariants;
@@ -340,6 +378,7 @@ export default function App() {
                 selectedId={selectedVariant?.id}
                 mainId={state.mainId}
                 onSelect={selectVariant}
+                onDelete={deleteVariant}
                 knownUsers={knownUsers}
               />
             ))}
@@ -380,6 +419,11 @@ export default function App() {
           </div>
           <div className="actions">
             <button onClick={forkVariant}>Fork</button>
+            {selectedVariant && state.mainId !== selectedVariant.id && (
+              <button className="danger" onClick={() => deleteVariant(selectedVariant.id)}>
+                Delete
+              </button>
+            )}
             <button className="primary" onClick={() => promoteVariant(selectedVariant.id)}>
               Promote to main
             </button>
